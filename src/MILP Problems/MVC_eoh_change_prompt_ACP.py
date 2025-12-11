@@ -23,6 +23,8 @@ import traceback
 
 from selection import prob_rank, equal, roulette_wheel, tournament
 from management import pop_greedy, ls_greedy, ls_sa
+from typing import Union
+from openai import OpenAI
 
 # Define necessary classes
 class Paras:
@@ -479,7 +481,8 @@ class PROBLEMCONST:
         for i in range(n):
             ans += coefficient[i] * new_sol[i]
         return(ans)
-    
+
+    # 这个部分怎么会超时呢？
     def greedy_one(self, now_instance_data, eva):
         n = now_instance_data[0]
         m = now_instance_data[1]
@@ -649,6 +652,7 @@ class InterfaceAPI:
         self.debug_mode = debug_mode     # Whether debug mode is enabled
         self.n_trial = 5                 # Indicates a maximum of 5 attempts when trying to get a response
 
+    '''
     def get_response(self, prompt_content):
         # Create a JSON formatted string payload_explanation, containing the model name and message content. This JSON will be used as the request payload.
         payload_explanation = json.dumps(
@@ -665,14 +669,14 @@ class InterfaceAPI:
         # Define request headers
         headers = {
             "Authorization": "Bearer " + self.api_key,           # Contains API key, used for request authentication.
-            "User-Agent": "Apifox/1.0.0 (https://apifox.com)",   # Identifies client information for the request.
+            # "User-Agent": "Apifox/1.0.0 (https://apifox.com)",   # Identifies client information for the request.
             "Content-Type": "application/json",                  # Specifies the content type of the request as JSON.
-            "x-api2d-no-cache": 1,                               # Custom header for controlling cache behavior.
+            # "x-api2d-no-cache": 1,                               # Custom header for controlling cache behavior.
         }
-        
+
         response = None   # Initialize response variable to None, used to store API response content.
         n_trial = 1       # Initialize attempt count n_trial to 1, indicating the start of the first attempt.
-        
+
         # Start an infinite loop to repeatedly try getting an API response until successful or maximum attempts reached.
         while True:
             n_trial += 1
@@ -700,8 +704,51 @@ class InterfaceAPI:
                 if self.debug_mode:  # If debug mode is enabled, output debug information.
                     print("Error in API. Restarting the process...")
                 continue
-            
+
         return response
+    '''
+    def get_response(self, prompt_content):
+
+        client = OpenAI(
+            api_key=self.api_key,
+            base_url=self.api_endpoint)
+        # 构建消息
+        messages = [{"role": "user", "content": prompt_content}]
+
+        response = None
+
+        for attempt in range(1, getattr(self, 'n_trial', 5) + 1):
+            try:
+                if self.debug_mode:
+                    print(f"第{attempt}次尝试调用OpenAI API...")
+                # 调用OpenAI API
+                api_response = client.chat.completions.create(
+                    model=self.model_LLM,
+                    messages=messages,
+                    # temperature=getattr(self, 'temperature', 0.7),
+                    # max_tokens=getattr(self, 'max_tokens', 1000),
+                    # timeout=getattr(self, 'timeout', 30)
+                )
+                # print("Raw response:", api_response)
+                # 提取响应
+                response = api_response.choices[0].message.content
+                # 验证响应
+                if response and response.strip():
+                    if self.debug_mode:
+                        print(f"第{attempt}次尝试成功")
+                    break
+                else:
+                    if self.debug_mode:
+                        print(f"第{attempt}次尝试返回空响应")
+            except Exception as e:
+                if self.debug_mode:
+                    print(f"未知错误: {str(e)}")
+                if attempt < getattr(self, 'n_trial', 5):
+                    continue
+                else:
+                    response = f"错误: {str(e)}"
+                    break
+        return response if response else "错误: 无法获取响应"
 
 
 class InterfaceLLM:
@@ -1026,9 +1073,9 @@ class InterfaceEC_Prompt:
             else:
                 results = Parallel(n_jobs=self.n_p,timeout=self.timeout+15)(delayed(self.get_offspring)(pop, operator) for _ in range(1))
         except Exception as e:
-            if self.debug:
-                print(f"Error: {e}")
-            print("Parallel time out .")
+            # if self.debug:
+            print(f"Error: {e}")
+            # print("Parallel time out .")
             
         time.sleep(2)
 
@@ -1410,7 +1457,7 @@ def _add_numba_decorator(
 
 def add_numba_decorator(
         program: str,
-        function_name: str | Sequence[str],
+        function_name: Union[str , Sequence[str]],
 ) -> str:
     # If function_name is a string, it means only one function needs the decorator. In this case, call the helper function _add_numba_decorator and use its return value as the final result.
     if isinstance(function_name, str):
@@ -1613,64 +1660,67 @@ class InterfaceEC:
     # Used to generate offspring individuals and evaluate their fitness.
     def get_offspring(self, pop, operator, prompt):
 
-        try:
-            # Call the _get_alg method to generate offspring individuals from pop based on the operator (i1, m1, etc.), and return parent individual p and offspring individual offspring.
+        # try:
+        # Call the _get_alg method to generate offspring individuals from pop based on the operator (i1, m1, etc.), and return parent individual p and offspring individual offspring.
+        p, offspring = self._get_alg(pop, operator, prompt)
+
+        # Whether to use Numba.
+        if self.use_numba:
+            # Use regex r"def\s+(\w+)\s*\(.*\):" to match function definitions.
+            pattern = r"def\s+(\w+)\s*\(.*\):"
+            # Extract function name from offspring['code'].
+            match = re.search(pattern, offspring['code'])
+            function_name = match.group(1)
+            # Call add_numba_decorator method to add Numba decorator to the function.
+            code = add_numba_decorator(program=offspring['code'], function_name=function_name)
+        else:
+            code = offspring['code']
+
+        # Handle duplicate code.
+        n_retry= 1
+        while self.check_duplicate(pop, offspring['code']):
+            n_retry += 1
+            if self.debug:
+                print("duplicated code, wait 1 second and retrying ... ")
+
+            # If generated code duplicates existing code in the population, regenerate offspring.
             p, offspring = self._get_alg(pop, operator, prompt)
-            
+
             # Whether to use Numba.
             if self.use_numba:
-                # Use regex r"def\s+(\w+)\s*\(.*\):" to match function definitions.
                 pattern = r"def\s+(\w+)\s*\(.*\):"
-                # Extract function name from offspring['code'].
                 match = re.search(pattern, offspring['code'])
                 function_name = match.group(1)
-                # Call add_numba_decorator method to add Numba decorator to the function.
                 code = add_numba_decorator(program=offspring['code'], function_name=function_name)
             else:
                 code = offspring['code']
 
-            # Handle duplicate code.
-            n_retry= 1
-            while self.check_duplicate(pop, offspring['code']):
-                n_retry += 1
-                if self.debug:
-                    print("duplicated code, wait 1 second and retrying ... ")
-                
-                # If generated code duplicates existing code in the population, regenerate offspring.
-                p, offspring = self._get_alg(pop, operator, prompt)
+            # Attempt at most once.
+            if n_retry > 1:
+                break
 
-                # Whether to use Numba.
-                if self.use_numba:
-                    pattern = r"def\s+(\w+)\s*\(.*\):"
-                    match = re.search(pattern, offspring['code'])
-                    function_name = match.group(1)
-                    code = add_numba_decorator(program=offspring['code'], function_name=function_name)
-                else:
-                    code = offspring['code']
-                
-                # Attempt at most once.
-                if n_retry > 1:
-                    break
-                
-            # Create a thread pool: Use ThreadPoolExecutor to execute evaluation tasks.
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                # Submit self.interface_eval.evaluate method for evaluation, passing the generated code.
-                future = executor.submit(self.interface_eval.evaluate, code)
-                # Get the evaluation result fitness, round it to 5 decimal places, and store it in offspring['objective'].
-                fitness = future.result(timeout=self.timeout)
-                offspring['objective'] = np.round(fitness, 5)
-                # Cancel task to release resources.
-                future.cancel()              
+        # Create a thread pool: Use ThreadPoolExecutor to execute evaluation tasks.
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            # Submit self.interface_eval.evaluate method for evaluation, passing the generated code.
+            future = executor.submit(self.interface_eval.evaluate, code)
+            # Get the evaluation result fitness, round it to 5 decimal places, and store it in offspring['objective'].
+            fitness = future.result()
+            if not fitness:
+                fitness = np.inf
+            offspring['objective'] = np.round(fitness, 5)
+            # Cancel task to release resources.
+            future.cancel()
 
         # If an exception occurs, set offspring to a dictionary containing all None values, and set p to None.
-        except Exception as e:
-            offspring = {
-                'algorithm': None,
-                'code': None,
-                'objective': None,
-                'other_inf': None
-            }
-            p = None
+
+        # except Exception as e:
+        #     offspring = {
+        #         'algorithm': None,
+        #         'code': None,
+        #         'objective': None,
+        #         'other_inf': None
+        #     }
+        #     p = None
 
         # Return parent individual p and generated offspring individual offspring.
         return p, offspring
@@ -1681,10 +1731,11 @@ class InterfaceEC:
         try:
             # Generate self.pop_size offspring individuals. Results are stored in the 'results' list, where each element is a (p, off) tuple, with p as parent individuals and off as generated offspring individuals.
             results = Parallel(n_jobs=self.n_p,timeout=self.timeout+15)(delayed(self.get_offspring)(pop, operator, prompt) for _ in range(self.pop_size))
+            # results = self.get_offspring(pop, operator, prompt)
         except Exception as e:
-            if self.debug:
-                print(f"Error: {e}")
-            print("Parallel time out .")
+            # if self.debug:
+            print(f"Error: {e}")
+            # print("Parallel time out .")
             
         time.sleep(2)
 
@@ -1842,7 +1893,7 @@ class EOH:
             print("Cross Prompt: ", prompt['prompt'])
         for prompt in variation_operators:
             print("Variation Prompt: ", prompt['prompt'])
-        print("initial population has been created!")
+        print("initial prompt population has been created!")
 
 
         print("=======================================")
@@ -2108,9 +2159,9 @@ paras = Paras()
 # Set Parameters #
 paras.set_paras(method = "eoh",    # ['ael','eoh']
                 problem = "milp_construct", #['milp_construct','bp_online']
-                llm_api_endpoint = "your_llm_endpoint", # set your LLM endpoint
-                llm_api_key = "your_api_key",   # set your key
-                llm_model = "gpt-4o-mini",
+                llm_api_endpoint = "https://api.deepseek.com", # set your LLM endpoint
+                llm_api_key = "sk-873da33958ce4c9ab04651e1ec55fee8",   # set your key
+                llm_model = "deepseek-chat",
                 ec_pop_size = 4, # number of samples in each population
                 ec_n_pop = 20,  # number of populations
                 exp_n_proc = 4,  # multi-core parallel
@@ -2121,3 +2172,4 @@ evolution = EVOL(paras)
 
 # Run 
 evolution.run()
+# 没有instance_data，真的离谱！（363）
